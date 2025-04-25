@@ -29,14 +29,17 @@ def api_courses():
     def generate():
         results = []
         total = len(codes)
+        total_steps = total * 2  # Each subject has 2 steps: fetching and processing
+        current_step = 0
         
         for i, c in enumerate(codes):
             try:
-                # Start fetching message
+                # Start fetching message (counts as one step)
+                current_step = i * 2  # Two steps per subject
                 yield json.dumps({
                     "type": "progress",
-                    "current": i,
-                    "total": total,
+                    "current": current_step,
+                    "total": total_steps,
                     "code": c,
                     "status": "fetching"
                 }) + "\n"
@@ -69,12 +72,13 @@ def api_courses():
                             })
                     
                     results.append(formatted_course)
-                    
-                # Send progress update
+                
+                # Processing complete (counts as second step)
+                current_step = i * 2 + 1
                 yield json.dumps({
                     "type": "progress",
-                    "current": i + 1,
-                    "total": total,
+                    "current": current_step,
+                    "total": total_steps,
                     "code": c,
                     "status": "success" if course else "error"
                 }) + "\n"
@@ -83,25 +87,21 @@ def api_courses():
                 app.logger.error(f"Error fetching {c}: {e}", exc_info=True)
                 error_result = {"code": c, "error": str(e)}
                 results.append(error_result)
+                current_step = i * 2 + 1
                 yield json.dumps({
                     "type": "progress",
-                    "current": i + 1,
-                    "total": total,
+                    "current": current_step,
+                    "total": total_steps,
                     "code": c,
                     "status": "error",
                     "error": str(e)
                 }) + "\n"
         
-        app.logger.info("Sending complete message with %d results", len(results))
-        # Send a blank line to ensure proper streaming
-        yield "\n"
-        # Send the complete message with results
-        complete_message = json.dumps({
+        # Send the final complete message
+        yield json.dumps({
             "type": "complete",
             "results": results
-        })
-        app.logger.info("Complete message: %s", complete_message)
-        yield complete_message + "\n"
+        }) + "\n"
     
     return Response(generate(), mimetype='application/x-ndjson')
 
