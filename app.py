@@ -1,19 +1,128 @@
 # app.py
 from flask import Flask, request, jsonify, Response
-from test import fetch_course  # your existing code factored into fetch_course()
-import json
 from flask_cors import CORS  # Enable CORS
+import json
 import os
+import sys
+from bs4 import BeautifulSoup
+import requests
+import time
 
 app = Flask(__name__, static_folder='static')
 CORS(app)  # Enable CORS for all routes
 
-# Load pre-fetched data if available
-try:
-    with open('courses.json', encoding='utf-8') as f:
-        ALL_COURSES = {c['code']: c for c in json.load(f)}
-except FileNotFoundError:
-    ALL_COURSES = None
+# Global cache for course data
+ALL_COURSES = {}
+
+def fetch_course(code):
+    """Fetches and parses course information."""
+    BASE_URL = "https://handbookpre2025.uts.edu.au/2024/subjects/details"
+    url = f"{BASE_URL}/{code}.html"
+    
+    try:
+        resp = requests.get(url)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, 'html.parser')
+
+        # --- Helpers ---
+        def get_section_header(tag, text):
+            return tag.find(lambda t: t.name == 'h3' and text in t.get_text())
+
+        # --- Basic Info ---
+        title = soup.find('h1').get_text(strip=True) if soup.find('h1') else ''
+
+        # Credit points & result type & requisites via <em> tags
+        credit_points = ''
+        result_type = ''
+        requisites = ''
+        for em in soup.find_all('em'):
+            txt = em.get_text(strip=True)
+            if txt.startswith('Credit points'):
+                credit_points = em.next_sibling.strip() if em.next_sibling else ''
+            elif txt.startswith('Result type'):
+                result_type = em.next_sibling.strip() if em.next_sibling else ''
+            elif txt.startswith('Requisite'):
+                requisites = em.get_text(separator=' ', strip=True).replace('Requisite(s):', '').strip()
+
+        # --- Overview ---
+        overview = ''
+        desc_hdr = get_section_header(soup, 'Description')
+        if desc_hdr:
+            p = desc_hdr.find_next('p')
+            overview = p.get_text(strip=True) if p else ''
+
+        # --- Learning Outcomes ---
+        learning_outcomes = []
+        slo_hdr = get_section_header(soup, 'Subject learning objectives')
+        if slo_hdr:
+            slo_table = slo_hdr.find_next('table', class_='SLOTable')
+            if slo_table:
+                for row in slo_table.select('tr'):
+                    th = row.find('th')
+                    td = row.find('td')
+                    if th and td:
+                        learning_outcomes.append({
+                            'no': th.get_text(strip=True).rstrip('.'),
+                            'text': td.get_text(strip=True)
+                        })
+
+        # --- Content and Other Sections ---
+        def extract_section(soup, heading):
+            hdr = get_section_header(soup, heading)
+            blocks = []
+            if hdr:
+                for sib in hdr.find_next_siblings():
+                    if sib.name == 'h3': break
+                    if sib.name in ('p', 'ul', 'ol'):
+                        blocks.append(sib.get_text("\n", strip=True))
+            return '\n\n'.join(blocks)
+
+        content_topics = extract_section(soup, 'Content (topics)')
+        teaching_strategies = extract_section(soup, 'Teaching and learning strategies')
+        minimum_requirements = extract_section(soup, 'Minimum requirements')
+        recommended_texts = extract_section(soup, 'Recommended texts')
+
+        # --- Assessment Tasks ---
+        assessment = []
+        assess_hdr = get_section_header(soup, 'Assessment')
+        if assess_hdr:
+            task = None
+            for node in assess_hdr.find_all_next():
+                if node.name == 'h3': break
+                
+                if node.name == 'h4':
+                    if task: assessment.append(task)
+                    task = {'title': node.get_text(strip=True), 'details': {}}
+                
+                elif task and node.name == 'table' and 'assessmentTaskTable' in (node.get('class') or []):
+                    for row in node.select('tr'):
+                        th = row.find('th')
+                        td = row.find('td')
+                        if th and td:
+                            key = th.get_text(strip=True).rstrip(':')
+                            value = td.get_text("\n", strip=True)
+                            task['details'][key] = value
+            
+            if task: assessment.append(task)
+
+        return {
+            'code': code,
+            'title': title,
+            'credit_points': credit_points,
+            'result_type': result_type,
+            'requisites': requisites,
+            'overview': overview,
+            'learning_outcomes': learning_outcomes,
+            'teaching_strategies': teaching_strategies,
+            'content_topics': content_topics,
+            'minimum_requirements': minimum_requirements,
+            'recommended_texts': recommended_texts,
+            'assessment': assessment
+        }
+
+    except Exception as e:
+        app.logger.error(f"Error fetching {code}: {e}", exc_info=True)
+        raise
 
 # serve index.html at root
 @app.route('/')
@@ -37,39 +146,7 @@ def api_courses():
                 app.logger.info(" • %s → %s", code, "FOUND" if course else "MISSING")
                 
                 if course:
-                    # Format course data properly with all details
-                    formatted_course = {
-                        "code": course['code'],
-                        "title": course['title'],
-                        "requisites": course.get('requisites', "None specified"),
-                        "overview": course.get('overview', ''),
-                        "credit_points": course.get('credit_points', ''),
-                        "result_type": course.get('result_type', ''),
-                        "content_topics": course.get('content_topics', ''),
-                        "teaching_strategies": course.get('teaching_strategies', ''),
-                        "minimum_requirements": course.get('minimum_requirements', ''),
-                        "recommended_texts": course.get('recommended_texts', ''),
-                        "learning_outcomes": course.get('learning_outcomes', []),
-                        "CILOs": course.get('CILOs', []),
-                        "assessment": []
-                    }
-                    
-                    # Format assessment data
-                    for task in course.get('assessment', []):
-                        if task.get('title') and task.get('details'):
-                            details = task['details']
-                            formatted_course['assessment'].append({
-                                "title": task['title'],
-                                "details": {
-                                    "Type": details.get('Type', 'Unknown'),
-                                    "Weight": details.get('Weight', '0%'),
-                                    "Groupwork": details.get('Groupwork', 'Individual'),
-                                    "Length": details.get('Length', 'Not specified'),
-                                    "Intent": details.get('Intent', '')
-                                }
-                            })
-                    
-                    results.append(formatted_course)
+                    results.append(course)
                 
                 completed += 1
                 yield json.dumps({
