@@ -9,7 +9,31 @@ import requests
 import time
 
 app = Flask(__name__, static_folder='static')
-CORS(app)  # Enable CORS for all routes
+
+# Configure CORS to allow requests from all origins during development
+CORS(app, resources={
+    r"/*": {
+        "origins": "*",  # Allow all origins
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type"],
+        "expose_headers": ["Content-Range", "X-Content-Range"],
+        "max_age": 3600,
+        "supports_credentials": True
+    }
+})
+
+# Add CORS headers to all responses
+@app.after_request
+def after_request(response):
+    if 'HTTP_ORIGIN' in request.environ:
+        origin = request.environ['HTTP_ORIGIN']
+        if origin in ['https://mathgeniustb2.github.io'] or origin.startswith('http://localhost:'):
+            response.headers.add('Access-Control-Allow-Origin', origin)
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    response.headers.add('Access-Control-Allow-Credentials', 'true')
+    response.headers.add('Access-Control-Max-Age', '3600')
+    return response
 
 # Global cache for course data
 ALL_COURSES = {}
@@ -176,6 +200,11 @@ def api_courses():
         }) + "\n"
     
     return Response(generate(), mimetype='application/x-ndjson')
+
+@app.route('/api/warmup', methods=['GET'])
+def warmup():
+    """Simple endpoint to warmup the server"""
+    return jsonify({"status": "ready"})
 
 @app.after_request
 def add_header(response):
