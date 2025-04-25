@@ -62,31 +62,30 @@ def api_courses():
                     
                     results.append(formatted_course)
                 
-                # Only send one progress update per course after it's processed
+                # Only send progress update after course is completed
                 completed += 1
                 yield json.dumps({
                     "type": "progress",
-                    "current": completed,
+                    "completed": completed,
                     "total": total,
-                    "code": code,
-                    "status": "success" if course else "error"
+                    "code": code
                 }) + "\n"
                 
             except Exception as e:
                 app.logger.error(f"Error fetching {code}: {e}", exc_info=True)
                 error_result = {"code": code, "error": str(e)}
                 results.append(error_result)
+                # Still increment progress even on error
                 completed += 1
                 yield json.dumps({
                     "type": "progress",
-                    "current": completed,
+                    "completed": completed,
                     "total": total,
                     "code": code,
-                    "status": "error",
                     "error": str(e)
                 }) + "\n"
         
-        # Send the final complete message
+        # Send final results
         yield json.dumps({
             "type": "complete",
             "results": results
