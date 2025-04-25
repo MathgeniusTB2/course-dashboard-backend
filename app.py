@@ -37,11 +37,20 @@ def api_courses():
                 app.logger.info(" • %s → %s", code, "FOUND" if course else "MISSING")
                 
                 if course:
-                    # Format course data properly
+                    # Format course data properly with all details
                     formatted_course = {
                         "code": course['code'],
                         "title": course['title'],
                         "requisites": course.get('requisites', "None specified"),
+                        "overview": course.get('overview', ''),
+                        "credit_points": course.get('credit_points', ''),
+                        "result_type": course.get('result_type', ''),
+                        "content_topics": course.get('content_topics', ''),
+                        "teaching_strategies": course.get('teaching_strategies', ''),
+                        "minimum_requirements": course.get('minimum_requirements', ''),
+                        "recommended_texts": course.get('recommended_texts', ''),
+                        "learning_outcomes": course.get('learning_outcomes', []),
+                        "CILOs": course.get('CILOs', []),
                         "assessment": []
                     }
                     
@@ -62,7 +71,6 @@ def api_courses():
                     
                     results.append(formatted_course)
                 
-                # Only send progress update after course is completed
                 completed += 1
                 yield json.dumps({
                     "type": "progress",
@@ -75,7 +83,6 @@ def api_courses():
                 app.logger.error(f"Error fetching {code}: {e}", exc_info=True)
                 error_result = {"code": code, "error": str(e)}
                 results.append(error_result)
-                # Still increment progress even on error
                 completed += 1
                 yield json.dumps({
                     "type": "progress",
