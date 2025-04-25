@@ -1,5 +1,5 @@
 # app.py
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 from test import fetch_course  # your existing code factored into fetch_course()
 import json
 from flask_cors import CORS  # Enable CORS
@@ -25,23 +25,52 @@ def api_courses():
     data = request.get_json()
     codes = data.get('subject_codes', [])
     app.logger.info("→ received codes: %s", codes)
-    results = []
     
-    for c in codes:
-        try:
-            course = ALL_COURSES.get(c) if ALL_COURSES else fetch_course(c)
-            app.logger.info(" • %s → %s", c, "FOUND" if course else "MISSING")
-            
-            # Ensure prerequisite information is included
-            if course and 'requisites' not in course:
-                course['requisites'] = "None specified"
+    def generate():
+        results = []
+        total = len(codes)
+        
+        for i, c in enumerate(codes, 1):
+            try:
+                course = ALL_COURSES.get(c) if ALL_COURSES else fetch_course(c)
+                app.logger.info(" • %s → %s", c, "FOUND" if course else "MISSING")
                 
-            results.append(course or {"code": c, "error": "not found"})
-        except Exception as e:
-            app.logger.error(f"Error fetching {c}: {e}", exc_info=True)
-            results.append({"code": c, "error": str(e)})
+                # Ensure prerequisite information is included
+                if course and 'requisites' not in course:
+                    course['requisites'] = "None specified"
+                    
+                result = course or {"code": c, "error": "not found"}
+                results.append(result)
+                
+                # Send progress update
+                yield json.dumps({
+                    "type": "progress",
+                    "current": i,
+                    "total": total,
+                    "code": c,
+                    "status": "success" if course else "error"
+                }) + "\n"
+                
+            except Exception as e:
+                app.logger.error(f"Error fetching {c}: {e}", exc_info=True)
+                error_result = {"code": c, "error": str(e)}
+                results.append(error_result)
+                yield json.dumps({
+                    "type": "progress",
+                    "current": i,
+                    "total": total,
+                    "code": c,
+                    "status": "error",
+                    "error": str(e)
+                }) + "\n"
+        
+        # Send final results
+        yield json.dumps({
+            "type": "complete",
+            "results": results
+        })
     
-    return jsonify(results)
+    return Response(generate(), mimetype='application/x-ndjson')
 
 @app.after_request
 def add_header(response):
