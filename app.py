@@ -56,35 +56,28 @@ def api_courses():
                     # Format assessment data
                     for task in course.get('assessment', []):
                         if task.get('title') and task.get('details'):
+                            details = task['details']
                             formatted_course['assessment'].append({
                                 "title": task['title'],
                                 "details": {
-                                    "Type": task['details'].get('Type', 'Unknown'),
-                                    "Weight": task['details'].get('Weight', '0%'),
-                                    "Groupwork": task['details'].get('Groupwork', 'Individual'),
-                                    "Length": task['details'].get('Length', 'Not specified'),
-                                    "Intent": task['details'].get('Intent', '')
+                                    "Type": details.get('Type', 'Unknown'),
+                                    "Weight": details.get('Weight', '0%'),
+                                    "Groupwork": details.get('Groupwork', 'Individual'),
+                                    "Length": details.get('Length', 'Not specified'),
+                                    "Intent": details.get('Intent', '')
                                 }
                             })
                     
                     results.append(formatted_course)
-                    yield json.dumps({
-                        "type": "progress",
-                        "current": i + 1,
-                        "total": total,
-                        "code": c,
-                        "status": "success"
-                    }) + "\n"
-                else:
-                    results.append({"code": c, "error": "not found"})
-                    yield json.dumps({
-                        "type": "progress",
-                        "current": i + 1,
-                        "total": total,
-                        "code": c,
-                        "status": "error",
-                        "error": "Course not found"
-                    }) + "\n"
+                    
+                # Send progress update
+                yield json.dumps({
+                    "type": "progress",
+                    "current": i + 1,
+                    "total": total,
+                    "code": c,
+                    "status": "success" if course else "error"
+                }) + "\n"
                 
             except Exception as e:
                 app.logger.error(f"Error fetching {c}: {e}", exc_info=True)
@@ -99,11 +92,16 @@ def api_courses():
                     "error": str(e)
                 }) + "\n"
         
-        # Send final results
-        yield json.dumps({
+        app.logger.info("Sending complete message with %d results", len(results))
+        # Send a blank line to ensure proper streaming
+        yield "\n"
+        # Send the complete message with results
+        complete_message = json.dumps({
             "type": "complete",
             "results": results
         })
+        app.logger.info("Complete message: %s", complete_message)
+        yield complete_message + "\n"
     
     return Response(generate(), mimetype='application/x-ndjson')
 
