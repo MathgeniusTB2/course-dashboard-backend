@@ -29,17 +29,15 @@ def api_courses():
     def generate():
         results = []
         total = len(codes)
-        total_steps = total * 2  # Each subject has 2 steps: fetching and processing
-        current_step = 0
+        completed = 0
         
         for i, c in enumerate(codes):
             try:
-                # Start fetching message (counts as one step)
-                current_step = i * 2  # Two steps per subject
+                # Start fetching message
                 yield json.dumps({
                     "type": "progress",
-                    "current": current_step,
-                    "total": total_steps,
+                    "current": completed,
+                    "total": total,
                     "code": c,
                     "status": "fetching"
                 }) + "\n"
@@ -73,12 +71,12 @@ def api_courses():
                     
                     results.append(formatted_course)
                 
-                # Processing complete (counts as second step)
-                current_step = i * 2 + 1
+                # Increment completed count after processing
+                completed += 1
                 yield json.dumps({
                     "type": "progress",
-                    "current": current_step,
-                    "total": total_steps,
+                    "current": completed,
+                    "total": total,
                     "code": c,
                     "status": "success" if course else "error"
                 }) + "\n"
@@ -87,11 +85,11 @@ def api_courses():
                 app.logger.error(f"Error fetching {c}: {e}", exc_info=True)
                 error_result = {"code": c, "error": str(e)}
                 results.append(error_result)
-                current_step = i * 2 + 1
+                completed += 1
                 yield json.dumps({
                     "type": "progress",
-                    "current": current_step,
-                    "total": total_steps,
+                    "current": completed,
+                    "total": total,
                     "code": c,
                     "status": "error",
                     "error": str(e)
