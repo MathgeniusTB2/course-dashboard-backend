@@ -48,8 +48,14 @@ def fetch_course(code):
     overview = ''
     desc_hdr = get_section_header(soup, 'Description')
     if desc_hdr:
-        p = desc_hdr.find_next('p')
-        overview = p.get_text(strip=True) if p else ''
+        # Get all text until we hit the next section header (h3)
+        overview_parts = []
+        for sibling in desc_hdr.find_next_siblings():
+            if sibling.name == 'h3':
+                break
+            if sibling.name == 'p':
+                overview_parts.append(sibling.get_text(strip=True))
+        overview = ' '.join(overview_parts)
 
     # Subject Learning Objectives (SLOs)
     learning_outcomes = []
