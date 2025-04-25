@@ -30,8 +30,17 @@ def api_courses():
         results = []
         total = len(codes)
         
-        for i, c in enumerate(codes, 1):
+        for i, c in enumerate(codes):
             try:
+                # Start fetching message
+                yield json.dumps({
+                    "type": "progress",
+                    "current": i,
+                    "total": total,
+                    "code": c,
+                    "status": "fetching"
+                }) + "\n"
+                
                 course = ALL_COURSES.get(c) if ALL_COURSES else fetch_course(c)
                 app.logger.info(" • %s → %s", c, "FOUND" if course else "MISSING")
                 
@@ -42,10 +51,10 @@ def api_courses():
                 result = course or {"code": c, "error": "not found"}
                 results.append(result)
                 
-                # Send progress update
+                # Send completion message for this course
                 yield json.dumps({
                     "type": "progress",
-                    "current": i,
+                    "current": i + 1,  # +1 because we completed this one
                     "total": total,
                     "code": c,
                     "status": "success" if course else "error"
@@ -57,7 +66,7 @@ def api_courses():
                 results.append(error_result)
                 yield json.dumps({
                     "type": "progress",
-                    "current": i,
+                    "current": i + 1,  # Still increment progress even on error
                     "total": total,
                     "code": c,
                     "status": "error",
