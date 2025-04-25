@@ -28,16 +28,17 @@ def api_courses():
     
     def generate():
         results = []
-        total = len(codes)
-        completed = 0
+        total_steps = len(codes)
+        current_step = 0
         
         for i, c in enumerate(codes):
             try:
-                # Start fetching message
+                # Send progress update at start of fetching
+                current_step = i
                 yield json.dumps({
                     "type": "progress",
-                    "current": completed,
-                    "total": total,
+                    "current": current_step,
+                    "total": total_steps,
                     "code": c,
                     "status": "fetching"
                 }) + "\n"
@@ -71,29 +72,33 @@ def api_courses():
                     
                     results.append(formatted_course)
                 
-                # Increment completed count after processing
-                completed += 1
+                # Send progress update after processing
                 yield json.dumps({
                     "type": "progress",
-                    "current": completed,
-                    "total": total,
+                    "current": current_step + 1,
+                    "total": total_steps,
                     "code": c,
                     "status": "success" if course else "error"
                 }) + "\n"
+                
+                # Update for next iteration
+                current_step += 1
                 
             except Exception as e:
                 app.logger.error(f"Error fetching {c}: {e}", exc_info=True)
                 error_result = {"code": c, "error": str(e)}
                 results.append(error_result)
-                completed += 1
+                # Send error progress update
                 yield json.dumps({
                     "type": "progress",
-                    "current": completed,
-                    "total": total,
+                    "current": current_step + 1,
+                    "total": total_steps,
                     "code": c,
                     "status": "error",
                     "error": str(e)
                 }) + "\n"
+                # Update for next iteration
+                current_step += 1
         
         # Send the final complete message
         yield json.dumps({
