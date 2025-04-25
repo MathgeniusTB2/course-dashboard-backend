@@ -68,18 +68,46 @@ def fetch_course(code):
             elif txt.startswith('Requisite'):
                 requisites = em.get_text(separator=' ', strip=True).replace('Requisite(s):', '').strip()
 
-        # --- Overview ---
-        overview = ''
+        # --- Overview and Content Sections ---
+        overview = {
+            'description': '',
+            'course_structure': [],
+            'teaching_strategies': [],
+            'topics': [],
+            'outcomes': []
+        }
+        
         desc_hdr = get_section_header(soup, 'Description')
         if desc_hdr:
-            # Get all text until we hit the next section header (h3)
             overview_parts = []
             for sibling in desc_hdr.find_next_siblings():
                 if sibling.name == 'h3':
                     break
                 if sibling.name == 'p':
                     overview_parts.append(sibling.get_text(strip=True))
-            overview = ' '.join(overview_parts)
+            overview['description'] = ' '.join(overview_parts)
+        
+        # Extract teaching strategies
+        teaching_hdr = get_section_header(soup, 'Teaching and learning strategies')
+        if teaching_hdr:
+            for sibling in teaching_hdr.find_next_siblings():
+                if sibling.name == 'h3':
+                    break
+                if sibling.name in ('p', 'ul', 'ol'):
+                    strategies = sibling.get_text(strip=True).split('\n')
+                    overview['teaching_strategies'].extend([s.strip() for s in strategies if s.strip()])
+
+        # Extract content topics
+        topics_hdr = get_section_header(soup, 'Content (topics)')
+        if topics_hdr:
+            for sibling in topics_hdr.find_next_siblings():
+                if sibling.name == 'h3':
+                    break
+                if sibling.name in ('p', 'ul', 'ol'):
+                    text = sibling.get_text(strip=True)
+                    if text.startswith('Topics include:'):
+                        topics = text.replace('Topics include:', '').split(';')
+                        overview['topics'].extend([t.strip() for t in topics if t.strip()])
 
         # --- Learning Outcomes ---
         learning_outcomes = []
