@@ -2,179 +2,219 @@ import requests
 from bs4 import BeautifulSoup
 import json
 import time
+import logging
+from typing import List, Dict, Optional
+from pathlib import Path
+from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# --- Configuration ---
-BASE_URL = "https://handbookpre2025.uts.edu.au/2024/subjects/details"
-OUTPUT_FILE = "courses.json"
-SUBJECT_CODES = [
-    "33230",
-]
-REQUEST_DELAY = 0.1
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
+@dataclass
+class CourseConfig:
+    """Configuration for course scraping"""
+    base_url: str = "https://handbookpre2025.uts.edu.au/2024/subjects/details"
+    output_file: Path = Path("courses.json")
+    request_delay: float = 0.1
+    max_workers: int = 4
 
-def fetch_course(code):
-    """
-    Fetches and parses the course page for the given subject code.
-    Returns a dictionary of extracted fields.
-    """
-    url = f"{BASE_URL}/{code}.html"
-    resp = requests.get(url)
-    resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, 'html.parser')
-
-    # --- Helpers ---
-    def get_section_header(tag, text):
-        return tag.find(lambda t: t.name == 'h3' and text in t.get_text())
-
-    # --- Metadata ---
-    title = soup.find('h1').get_text(strip=True) if soup.find('h1') else ''
-
-    # Credit points & result type & requisites via <em> tags
-    credit_points = ''
-    result_type = ''
-    requisites = ''
-    for em in soup.find_all('em'):
-        txt = em.get_text(strip=True)
-        if txt.startswith('Credit points'):
-            # next_sibling may be whitespace/text then value
-            credit_points = em.next_sibling.strip() if em.next_sibling else ''
-        elif txt.startswith('Result type'):
-            result_type = em.next_sibling.strip() if em.next_sibling else ''
-        elif txt.startswith('Requisite'):
-            # entire em contains links and text
-            requisites = em.get_text(separator=' ', strip=True).replace('Requisite(s):', '').strip()
-
-    # --- Overview and Content Sections ---
-    overview = {
-        'description': '',
-        'course_structure': [],
-        'teaching_strategies': [],
-        'topics': [],
-        'outcomes': []
-    }
+class CourseScraper:
+    def __init__(self, config: CourseConfig):
+        self.config = config
+        self.session = requests.Session()
     
-    desc_hdr = get_section_header(soup, 'Description')
-    if desc_hdr:
-        overview_parts = []
-        for sibling in desc_hdr.find_next_siblings():
+    def fetch_courses(self, codes: List[str]) -> List[Dict]:
+        """Fetch multiple courses in parallel with rate limiting"""
+        courses = []
+        with ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
+            future_to_code = {
+                executor.submit(self._fetch_single_course, code): code 
+                for code in codes
+            }
+            
+            for future in as_completed(future_to_code):
+                code = future_to_code[future]
+                try:
+                    course = future.result()
+                    if course:
+                        courses.append(course)
+                        logger.info(f"Successfully fetched course {code}")
+                    time.sleep(self.config.request_delay)
+                except Exception as e:
+                    logger.error(f"Error fetching course {code}: {e}")
+        
+        return courses
+    
+    def _fetch_single_course(self, code: str) -> Optional[Dict]:
+        """Fetch and parse a single course"""
+        try:
+            url = f"{self.config.base_url}/{code}.html"
+            response = self.session.get(url)
+            response.raise_for_status()
+            
+            soup = BeautifulSoup(response.text, 'html.parser')
+            return self._parse_course(soup, code)
+        except Exception as e:
+            logger.error(f"Error fetching {code}: {e}")
+            return None
+
+    def _parse_course(self, soup: BeautifulSoup, code: str) -> Dict:
+        """Parse course details from soup"""
+        return {
+            'code': code,
+            'title': self._extract_title(soup),
+            'credit_points': self._extract_credit_points(soup),
+            'requisites': self._extract_requisites(soup),
+            'overview': self._extract_overview(soup),
+            'learning_outcomes': self._extract_learning_outcomes(soup),
+            'assessment': self._extract_assessment(soup)
+        }
+
+    def save_courses(self, courses: List[Dict]) -> None:
+        """Save courses to JSON file"""
+        self.config.output_file.write_text(
+            json.dumps(courses, indent=2, ensure_ascii=False),
+            encoding='utf-8'
+        )
+        logger.info(f"Saved {len(courses)} courses to {self.config.output_file}")
+
+    def _extract_title(self, soup: BeautifulSoup) -> str:
+        """Extract course title"""
+        if title_elem := soup.find('h1'):
+            return title_elem.get_text(strip=True)
+        return ''
+
+    def _extract_credit_points(self, soup: BeautifulSoup) -> str:
+        """Extract credit points"""
+        for em in soup.find_all('em'):
+            if txt := em.get_text(strip=True):
+                if txt.startswith('Credit points'):
+                    return em.next_sibling.strip() if em.next_sibling else ''
+        return ''
+
+    def _extract_requisites(self, soup: BeautifulSoup) -> str:
+        """Extract prerequisites"""
+        for em in soup.find_all('em'):
+            if txt := em.get_text(strip=True):
+                if txt.startswith('Requisite'):
+                    return em.get_text(separator=' ', strip=True).replace('Requisite(s):', '').strip()
+        return ''
+
+    def _extract_overview(self, soup: BeautifulSoup) -> Dict:
+        """Extract course overview sections"""
+        overview = {
+            'description': '',
+            'teaching_strategies': [],
+            'topics': []
+        }
+        
+        # Extract description
+        if desc_section := self._find_section(soup, 'Description'):
+            overview['description'] = self._extract_section_text(desc_section)
+        
+        # Extract teaching strategies
+        if strategies_section := self._find_section(soup, 'Teaching and learning strategies'):
+            overview['teaching_strategies'] = self._extract_section_list(strategies_section)
+        
+        # Extract topics
+        if topics_section := self._find_section(soup, 'Content (topics)'):
+            topics_text = self._extract_section_text(topics_section)
+            if 'Topics include:' in topics_text:
+                topics = topics_text.replace('Topics include:', '').split(';')
+                overview['topics'] = [t.strip() for t in topics if t.strip()]
+        
+        return overview
+
+    def _extract_learning_outcomes(self, soup: BeautifulSoup) -> List[Dict]:
+        """Extract learning outcomes"""
+        outcomes = []
+        seen_outcomes = set()
+        
+        if slo_table := soup.find('table', class_='SLOTable'):
+            for row in slo_table.select('tr'):
+                if (th := row.find('th')) and (td := row.find('td')):
+                    outcome_text = td.get_text(strip=True)
+                    if outcome_text not in seen_outcomes:
+                        outcomes.append({
+                            'no': th.get_text(strip=True).rstrip('.'),
+                            'text': outcome_text
+                        })
+                        seen_outcomes.add(outcome_text)
+        
+        return outcomes
+
+    def _extract_assessment(self, soup: BeautifulSoup) -> List[Dict]:
+        """Extract assessment tasks"""
+        assessment = []
+        
+        if assess_section := self._find_section(soup, 'Assessment'):
+            current_task = None
+            
+            for node in assess_section.find_all_next():
+                if node.name == 'h3':
+                    break
+                
+                if node.name == 'h4':
+                    if current_task:
+                        assessment.append(current_task)
+                    current_task = {'title': node.get_text(strip=True), 'details': {}}
+                
+                elif current_task and node.name == 'table' and 'assessmentTaskTable' in (node.get('class') or []):
+                    for row in node.select('tr'):
+                        if (th := row.find('th')) and (td := row.find('td')):
+                            key = th.get_text(strip=True).rstrip(':')
+                            current_task['details'][key] = td.get_text("\n", strip=True)
+            
+            if current_task:
+                assessment.append(current_task)
+        
+        return assessment
+
+    def _find_section(self, soup: BeautifulSoup, heading: str) -> Optional[BeautifulSoup]:
+        """Find a section by its heading"""
+        return soup.find(lambda t: t.name == 'h3' and heading in t.get_text())
+
+    def _extract_section_text(self, section: BeautifulSoup) -> str:
+        """Extract text content from a section"""
+        parts = []
+        for sibling in section.find_next_siblings():
             if sibling.name == 'h3':
                 break
             if sibling.name == 'p':
-                overview_parts.append(sibling.get_text(strip=True))
-        overview['description'] = ' '.join(overview_parts)
-    
-    # Extract teaching strategies
-    teaching_hdr = get_section_header(soup, 'Teaching and learning strategies')
-    if teaching_hdr:
-        for sibling in teaching_hdr.find_next_siblings():
-            if sibling.name == 'h3':
-                break
-            if sibling.name in ('p', 'ul', 'ol'):
-                strategies = sibling.get_text(strip=True).split('\n')
-                overview['teaching_strategies'].extend([s.strip() for s in strategies if s.strip()])
+                parts.append(sibling.get_text(strip=True))
+        return ' '.join(parts)
 
-    # Extract content topics
-    topics_hdr = get_section_header(soup, 'Content (topics)')
-    if topics_hdr:
-        for sibling in topics_hdr.find_next_siblings():
+    def _extract_section_list(self, section: BeautifulSoup) -> List[str]:
+        """Extract list items from a section"""
+        items = []
+        for sibling in section.find_next_siblings():
             if sibling.name == 'h3':
                 break
             if sibling.name in ('p', 'ul', 'ol'):
                 text = sibling.get_text(strip=True)
-                if text.startswith('Topics include:'):
-                    topics = text.replace('Topics include:', '').split(';')
-                    overview['topics'].extend([t.strip() for t in topics if t.strip()])
-
-    # Subject Learning Objectives (SLOs)
-    learning_outcomes = []
-    slo_hdr = get_section_header(soup, 'Subject learning objectives')
-    if slo_hdr:
-        slo_table = slo_hdr.find_next('table', class_='SLOTable')
-        if slo_table:
-            for row in slo_table.select('tr'):
-                th = row.find('th')
-                td = row.find('td')
-                if th and td:
-                    learning_outcomes.append({
-                        'no': th.get_text(strip=True).rstrip('.'),
-                        'text': td.get_text(strip=True)
-                    })
-
-    # Course Intended Learning Outcomes (CILOs)
-    cilos = []
-    cilo_hdr = get_section_header(soup, 'Course intended learning outcomes')
-    if cilo_hdr:
-        cilo_ul = cilo_hdr.find_next('ul', class_='CILOList')
-        if cilo_ul:
-            cilos = [li.get_text(strip=True) for li in cilo_ul.find_all('li')]
-
-    # Content, teaching, minimum, recommended
-    def extract_section(soup, heading):
-        hdr = get_section_header(soup, heading)
-        blocks = []
-        if hdr:
-            for sib in hdr.find_next_siblings():
-                if sib.name == 'h3':
-                    break
-                if sib.name in ('p', 'ul', 'ol'):
-                    blocks.append(sib.get_text("\n", strip=True))
-        return '\n\n'.join(blocks)
-
-    teaching_strategies = extract_section(soup, 'Teaching and learning strategies')
-    content_topics = extract_section(soup, 'Content (topics)')
-    minimum_requirements = extract_section(soup, 'Minimum requirements')
-    recommended_texts = extract_section(soup, 'Recommended texts')
-
-    # Assessment tasks
-    assessment = []
-    assess_hdr = get_section_header(soup, 'Assessment')
-    if assess_hdr:
-        for node in assess_hdr.find_all_next():
-            if node.name == 'h3':
-                break
-            if node.name == 'h4':
-                task = {'title': node.get_text(strip=True), 'details': {}}
-                tbl = node.find_next('table', class_='assessmentTaskTable')
-                if tbl:
-                    for row in tbl.select('tr'):
-                        th = row.find('th')
-                        td = row.find('td')
-                        if th and td:
-                            key = th.get_text(strip=True).rstrip(':')
-                            task['details'][key] = td.get_text("\n", strip=True)
-                assessment.append(task)
-
-    return {
-        'code': code,
-        'title': title,
-        'credit_points': credit_points,
-        'result_type': result_type,
-        'requisites': requisites,
-        'overview': overview,
-        'learning_outcomes': learning_outcomes,
-        'CILOs': cilos,
-        'teaching_strategies': teaching_strategies,
-        'content_topics': content_topics,
-        'assessment': assessment,
-        'minimum_requirements': minimum_requirements,
-        'recommended_texts': recommended_texts
-    }
-
+                items.extend([item.strip() for item in text.split('\n') if item.strip()])
+        return items
 
 def main():
-    all_courses = []
-    for code in SUBJECT_CODES:
-        try:
-            print(f"Fetching {code}...")
-            all_courses.append(fetch_course(code))
-        except Exception as e:
-            print(f"Error fetching {code}: {e}")
-        time.sleep(REQUEST_DELAY)
-
-    with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
-        json.dump(all_courses, f, indent=2, ensure_ascii=False)
-    print(f"Saved {len(all_courses)} courses to {OUTPUT_FILE}")
-
+    # Example subject codes
+    SUBJECT_CODES = ["33230"]
+    
+    # Create scraper instance
+    config = CourseConfig()
+    scraper = CourseScraper(config)
+    
+    try:
+        # Fetch and save courses
+        courses = scraper.fetch_courses(SUBJECT_CODES)
+        scraper.save_courses(courses)
+    except Exception as e:
+        logger.error(f"Error in main: {e}")
+        raise
 
 if __name__ == '__main__':
     main()

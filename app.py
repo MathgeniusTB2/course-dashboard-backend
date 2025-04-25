@@ -1,247 +1,231 @@
-# app.py
 from flask import Flask, request, jsonify, Response
-from flask_cors import CORS  # Enable CORS
+from flask_cors import CORS
 import json
-import os
-import sys
+import logging
 from bs4 import BeautifulSoup
 import requests
-import time
+from typing import Dict, List, Optional
+import os
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__, static_folder='static')
 
-# Configure CORS to allow requests from all origins during development
+# Configure CORS with environment-based origins
+ALLOWED_ORIGINS = ['https://mathgeniustb2.github.io']
+if os.environ.get('FLASK_ENV') == 'development':
+    ALLOWED_ORIGINS.append('http://localhost:*')
+
 CORS(app, resources={
     r"/*": {
-        "origins": "*",  # Allow all origins
+        "origins": ALLOWED_ORIGINS,
         "methods": ["GET", "POST", "OPTIONS"],
         "allow_headers": ["Content-Type"],
-        "expose_headers": ["Content-Range", "X-Content-Range"],
         "max_age": 3600,
         "supports_credentials": True
     }
 })
 
-# Add CORS headers to all responses
-@app.after_request
-def after_request(response):
-    if 'HTTP_ORIGIN' in request.environ:
-        origin = request.environ['HTTP_ORIGIN']
-        if origin in ['https://mathgeniustb2.github.io'] or origin.startswith('http://localhost:'):
-            response.headers.add('Access-Control-Allow-Origin', origin)
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
-    response.headers.add('Access-Control-Allow-Credentials', 'true')
-    response.headers.add('Access-Control-Max-Age', '3600')
-    return response
-
 # Global cache for course data
-ALL_COURSES = {}
+course_cache: Dict[str, dict] = {}
 
-def fetch_course(code):
+def fetch_course(code: str) -> dict:
     """Fetches and parses course information."""
     BASE_URL = "https://handbookpre2025.uts.edu.au/2024/subjects/details"
-    url = f"{BASE_URL}/{code}.html"
     
     try:
-        resp = requests.get(url)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, 'html.parser')
-
-        # --- Helpers ---
-        def get_section_header(tag, text):
-            return tag.find(lambda t: t.name == 'h3' and text in t.get_text())
-
-        # --- Basic Info ---
-        title = soup.find('h1').get_text(strip=True) if soup.find('h1') else ''
-
-        # Credit points & result type & requisites via <em> tags
-        credit_points = ''
-        result_type = ''
-        requisites = ''
-        for em in soup.find_all('em'):
-            txt = em.get_text(strip=True)
-            if txt.startswith('Credit points'):
-                credit_points = em.next_sibling.strip() if em.next_sibling else ''
-            elif txt.startswith('Result type'):
-                result_type = em.next_sibling.strip() if em.next_sibling else ''
-            elif txt.startswith('Requisite'):
-                requisites = em.get_text(separator=' ', strip=True).replace('Requisite(s):', '').strip()
-
-        # --- Overview and Content Sections ---
-        overview = {
-            'description': '',
-            'course_structure': [],
-            'teaching_strategies': [],
-            'topics': [],
-            'outcomes': []
-        }
+        response = requests.get(f"{BASE_URL}/{code}.html")
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, 'html.parser')
         
-        desc_hdr = get_section_header(soup, 'Description')
-        if desc_hdr:
-            overview_parts = []
-            for sibling in desc_hdr.find_next_siblings():
-                if sibling.name == 'h3':
-                    break
-                if sibling.name == 'p':
-                    overview_parts.append(sibling.get_text(strip=True))
-            overview['description'] = ' '.join(overview_parts)
-        
-        # Extract teaching strategies
-        teaching_hdr = get_section_header(soup, 'Teaching and learning strategies')
-        if teaching_hdr:
-            for sibling in teaching_hdr.find_next_siblings():
-                if sibling.name == 'h3':
-                    break
-                if sibling.name in ('p', 'ul', 'ol'):
-                    strategies = sibling.get_text(strip=True).split('\n')
-                    overview['teaching_strategies'].extend([s.strip() for s in strategies if s.strip()])
-
-        # Extract content topics
-        topics_hdr = get_section_header(soup, 'Content (topics)')
-        if topics_hdr:
-            for sibling in topics_hdr.find_next_siblings():
-                if sibling.name == 'h3':
-                    break
-                if sibling.name in ('p', 'ul', 'ol'):
-                    text = sibling.get_text(strip=True)
-                    if text.startswith('Topics include:'):
-                        topics = text.replace('Topics include:', '').split(';')
-                        overview['topics'].extend([t.strip() for t in topics if t.strip()])
-
-        # --- Learning Outcomes ---
-        learning_outcomes = []
-        slo_hdr = get_section_header(soup, 'Subject learning objectives')
-        if slo_hdr:
-            slo_table = slo_hdr.find_next('table', class_='SLOTable')
-            if slo_table:
-                for row in slo_table.select('tr'):
-                    th = row.find('th')
-                    td = row.find('td')
-                    if th and td:
-                        learning_outcomes.append({
-                            'no': th.get_text(strip=True).rstrip('.'),
-                            'text': td.get_text(strip=True)
-                        })
-
-        # --- Content and Other Sections ---
-        def extract_section(soup, heading):
-            hdr = get_section_header(soup, heading)
-            blocks = []
-            if hdr:
-                for sib in hdr.find_next_siblings():
-                    if sib.name == 'h3': break
-                    if sib.name in ('p', 'ul', 'ol'):
-                        blocks.append(sib.get_text("\n", strip=True))
-            return '\n\n'.join(blocks)
-
-        content_topics = extract_section(soup, 'Content (topics)')
-        teaching_strategies = extract_section(soup, 'Teaching and learning strategies')
-        minimum_requirements = extract_section(soup, 'Minimum requirements')
-        recommended_texts = extract_section(soup, 'Recommended texts')
-
-        # --- Assessment Tasks ---
-        assessment = []
-        assess_hdr = get_section_header(soup, 'Assessment')
-        if assess_hdr:
-            task = None
-            for node in assess_hdr.find_all_next():
-                if node.name == 'h3': break
-                
-                if node.name == 'h4':
-                    if task: assessment.append(task)
-                    task = {'title': node.get_text(strip=True), 'details': {}}
-                
-                elif task and node.name == 'table' and 'assessmentTaskTable' in (node.get('class') or []):
-                    for row in node.select('tr'):
-                        th = row.find('th')
-                        td = row.find('td')
-                        if th and td:
-                            key = th.get_text(strip=True).rstrip(':')
-                            value = td.get_text("\n", strip=True)
-                            task['details'][key] = value
-            
-            if task: assessment.append(task)
-
-        return {
+        # Extract course data using helper functions
+        course_data = {
             'code': code,
-            'title': title,
-            'credit_points': credit_points,
-            'result_type': result_type,
-            'requisites': requisites,
-            'overview': overview,
-            'learning_outcomes': learning_outcomes,
-            'teaching_strategies': teaching_strategies,
-            'content_topics': content_topics,
-            'minimum_requirements': minimum_requirements,
-            'recommended_texts': recommended_texts,
-            'assessment': assessment
+            'title': _extract_title(soup),
+            'credit_points': _extract_credit_points(soup),
+            'requisites': _extract_requisites(soup),
+            'overview': _extract_overview(soup),
+            'learning_outcomes': _extract_learning_outcomes(soup),
+            'assessment': _extract_assessment(soup)
         }
-
+        
+        return course_data
     except Exception as e:
-        app.logger.error(f"Error fetching {code}: {e}", exc_info=True)
+        logger.error(f"Error fetching course {code}: {e}")
         raise
 
-# serve index.html at root
-@app.route('/')
-def index():
-    return app.send_static_file('index.html')
+def _extract_title(soup: BeautifulSoup) -> str:
+    """Extract course title from soup"""
+    if title_elem := soup.find('h1'):
+        return title_elem.get_text(strip=True)
+    return ''
+
+def _extract_credit_points(soup: BeautifulSoup) -> str:
+    """Extract credit points from soup"""
+    for em in soup.find_all('em'):
+        if txt := em.get_text(strip=True):
+            if txt.startswith('Credit points'):
+                return em.next_sibling.strip() if em.next_sibling else ''
+    return ''
+
+def _extract_requisites(soup: BeautifulSoup) -> str:
+    """Extract requisites from soup"""
+    for em in soup.find_all('em'):
+        if txt := em.get_text(strip=True):
+            if txt.startswith('Requisite'):
+                return em.get_text(separator=' ', strip=True).replace('Requisite(s):', '').strip()
+    return ''
+
+def _extract_overview(soup: BeautifulSoup) -> Dict:
+    """Extract course overview sections"""
+    overview = {
+        'description': '',
+        'teaching_strategies': [],
+        'topics': []
+    }
+    
+    if desc_section := _find_section(soup, 'Description'):
+        overview['description'] = _extract_section_text(desc_section)
+    
+    if strategies_section := _find_section(soup, 'Teaching and learning strategies'):
+        overview['teaching_strategies'] = _extract_section_list(strategies_section)
+    
+    if topics_section := _find_section(soup, 'Content (topics)'):
+        topics_text = _extract_section_text(topics_section)
+        if 'Topics include:' in topics_text:
+            topics = topics_text.replace('Topics include:', '').split(';')
+            overview['topics'] = [t.strip() for t in topics if t.strip()]
+    
+    return overview
+
+def _extract_learning_outcomes(soup: BeautifulSoup) -> List[Dict]:
+    """Extract learning outcomes from soup"""
+    outcomes = []
+    seen_outcomes = set()
+    
+    if slo_table := soup.find('table', class_='SLOTable'):
+        for row in slo_table.select('tr'):
+            if (th := row.find('th')) and (td := row.find('td')):
+                outcome_text = td.get_text(strip=True)
+                if outcome_text not in seen_outcomes:
+                    outcomes.append({
+                        'no': th.get_text(strip=True).rstrip('.'),
+                        'text': outcome_text
+                    })
+                    seen_outcomes.add(outcome_text)
+    
+    return outcomes
+
+def _extract_assessment(soup: BeautifulSoup) -> List[Dict]:
+    """Extract assessment tasks from soup"""
+    assessment = []
+    
+    if assess_section := _find_section(soup, 'Assessment'):
+        current_task = None
+        
+        for node in assess_section.find_all_next():
+            if node.name == 'h3':
+                break
+            
+            if node.name == 'h4':
+                if current_task:
+                    assessment.append(current_task)
+                current_task = {'title': node.get_text(strip=True), 'details': {}}
+            
+            elif current_task and node.name == 'table' and 'assessmentTaskTable' in (node.get('class') or []):
+                for row in node.select('tr'):
+                    if (th := row.find('th')) and (td := row.find('td')):
+                        key = th.get_text(strip=True).rstrip(':')
+                        current_task['details'][key] = td.get_text("\n", strip=True)
+        
+        if current_task:
+            assessment.append(current_task)
+    
+    return assessment
+
+def _find_section(soup: BeautifulSoup, heading: str) -> Optional[BeautifulSoup]:
+    """Find a section by its heading"""
+    return soup.find(lambda t: t.name == 'h3' and heading in t.get_text())
+
+def _extract_section_text(section: BeautifulSoup) -> str:
+    """Extract text content from a section"""
+    parts = []
+    for sibling in section.find_next_siblings():
+        if sibling.name == 'h3':
+            break
+        if sibling.name == 'p':
+            parts.append(sibling.get_text(strip=True))
+    return ' '.join(parts)
+
+def _extract_section_list(section: BeautifulSoup) -> List[str]:
+    """Extract list items from a section"""
+    items = []
+    for sibling in section.find_next_siblings():
+        if sibling.name == 'h3':
+            break
+        if sibling.name in ('p', 'ul', 'ol'):
+            text = sibling.get_text(strip=True)
+            items.extend([item.strip() for item in text.split('\n') if item.strip()])
+    return items
 
 @app.route('/api/courses', methods=['POST'])
 def api_courses():
-    data = request.get_json()
-    codes = data.get('subject_codes', [])
-    app.logger.info("→ received codes: %s", codes)
-    
-    def generate():
-        results = []
-        total = len(codes)
-        completed = 0
+    try:
+        data = request.get_json()
+        codes = data.get('subject_codes', [])
+        logger.info(f"Received request for courses: {codes}")
         
-        for code in codes:
-            try:
-                course = ALL_COURSES.get(code) if ALL_COURSES else fetch_course(code)
-                app.logger.info(" • %s → %s", code, "FOUND" if course else "MISSING")
-                
-                if course:
+        def generate():
+            results = []
+            total = len(codes)
+            completed = 0
+            
+            for code in codes:
+                try:
+                    # Try cache first
+                    course = course_cache.get(code) or fetch_course(code)
+                    course_cache[code] = course
                     results.append(course)
-                
-                completed += 1
-                yield json.dumps({
-                    "type": "progress",
-                    "completed": completed,
-                    "total": total,
-                    "code": code
-                }) + "\n"
-                
-            except Exception as e:
-                app.logger.error(f"Error fetching {code}: {e}", exc_info=True)
-                error_result = {"code": code, "error": str(e)}
-                results.append(error_result)
-                completed += 1
-                yield json.dumps({
-                    "type": "progress",
-                    "completed": completed,
-                    "total": total,
-                    "code": code,
-                    "error": str(e)
-                }) + "\n"
+                    
+                    completed += 1
+                    yield json.dumps({
+                        "type": "progress",
+                        "completed": completed,
+                        "total": total,
+                        "code": code
+                    }) + "\n"
+                    
+                except Exception as e:
+                    logger.error(f"Error processing course {code}: {e}")
+                    yield json.dumps({
+                        "type": "progress",
+                        "completed": completed,
+                        "total": total,
+                        "code": code,
+                        "error": str(e)
+                    }) + "\n"
+            
+            yield json.dumps({
+                "type": "complete",
+                "results": results
+            }) + "\n"
         
-        # Send final results
-        yield json.dumps({
-            "type": "complete",
-            "results": results
-        }) + "\n"
-    
-    return Response(generate(), mimetype='application/x-ndjson')
+        return Response(generate(), mimetype='application/x-ndjson')
+        
+    except Exception as e:
+        logger.error(f"API error: {e}")
+        return jsonify({"error": str(e)}), 500
 
-@app.route('/api/warmup', methods=['GET'])
+@app.route('/api/warmup')
 def warmup():
-    """Simple endpoint to warmup the server"""
+    """Health check endpoint"""
     return jsonify({"status": "ready"})
 
 @app.after_request
 def add_header(response):
+    """Add cache control headers"""
     response.cache_control.max_age = 300  # 5 minutes
     return response
 
