@@ -28,23 +28,13 @@ def api_courses():
     
     def generate():
         results = []
-        total_steps = len(codes)
-        current_step = 0
+        total = len(codes)
+        completed = 0
         
-        for i, c in enumerate(codes):
+        for code in codes:
             try:
-                # Send progress update at start of fetching
-                current_step = i
-                yield json.dumps({
-                    "type": "progress",
-                    "current": current_step,
-                    "total": total_steps,
-                    "code": c,
-                    "status": "fetching"
-                }) + "\n"
-                
-                course = ALL_COURSES.get(c) if ALL_COURSES else fetch_course(c)
-                app.logger.info(" • %s → %s", c, "FOUND" if course else "MISSING")
+                course = ALL_COURSES.get(code) if ALL_COURSES else fetch_course(code)
+                app.logger.info(" • %s → %s", code, "FOUND" if course else "MISSING")
                 
                 if course:
                     # Format course data properly
@@ -72,33 +62,29 @@ def api_courses():
                     
                     results.append(formatted_course)
                 
-                # Send progress update after processing
+                # Only send one progress update per course after it's processed
+                completed += 1
                 yield json.dumps({
                     "type": "progress",
-                    "current": current_step + 1,
-                    "total": total_steps,
-                    "code": c,
+                    "current": completed,
+                    "total": total,
+                    "code": code,
                     "status": "success" if course else "error"
                 }) + "\n"
                 
-                # Update for next iteration
-                current_step += 1
-                
             except Exception as e:
-                app.logger.error(f"Error fetching {c}: {e}", exc_info=True)
-                error_result = {"code": c, "error": str(e)}
+                app.logger.error(f"Error fetching {code}: {e}", exc_info=True)
+                error_result = {"code": code, "error": str(e)}
                 results.append(error_result)
-                # Send error progress update
+                completed += 1
                 yield json.dumps({
                     "type": "progress",
-                    "current": current_step + 1,
-                    "total": total_steps,
-                    "code": c,
+                    "current": completed,
+                    "total": total,
+                    "code": code,
                     "status": "error",
                     "error": str(e)
                 }) + "\n"
-                # Update for next iteration
-                current_step += 1
         
         # Send the final complete message
         yield json.dumps({
