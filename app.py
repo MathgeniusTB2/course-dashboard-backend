@@ -44,21 +44,47 @@ def api_courses():
                 course = ALL_COURSES.get(c) if ALL_COURSES else fetch_course(c)
                 app.logger.info(" • %s → %s", c, "FOUND" if course else "MISSING")
                 
-                # Ensure prerequisite information is included
-                if course and 'requisites' not in course:
-                    course['requisites'] = "None specified"
+                if course:
+                    # Format course data properly
+                    formatted_course = {
+                        "code": course['code'],
+                        "title": course['title'],
+                        "requisites": course.get('requisites', "None specified"),
+                        "assessment": []
+                    }
                     
-                result = course or {"code": c, "error": "not found"}
-                results.append(result)
-                
-                # Send completion message for this course
-                yield json.dumps({
-                    "type": "progress",
-                    "current": i + 1,  # +1 because we completed this one
-                    "total": total,
-                    "code": c,
-                    "status": "success" if course else "error"
-                }) + "\n"
+                    # Format assessment data
+                    for task in course.get('assessment', []):
+                        if task.get('title') and task.get('details'):
+                            formatted_course['assessment'].append({
+                                "title": task['title'],
+                                "details": {
+                                    "Type": task['details'].get('Type', 'Unknown'),
+                                    "Weight": task['details'].get('Weight', '0%'),
+                                    "Groupwork": task['details'].get('Groupwork', 'Individual'),
+                                    "Length": task['details'].get('Length', 'Not specified'),
+                                    "Intent": task['details'].get('Intent', '')
+                                }
+                            })
+                    
+                    results.append(formatted_course)
+                    yield json.dumps({
+                        "type": "progress",
+                        "current": i + 1,
+                        "total": total,
+                        "code": c,
+                        "status": "success"
+                    }) + "\n"
+                else:
+                    results.append({"code": c, "error": "not found"})
+                    yield json.dumps({
+                        "type": "progress",
+                        "current": i + 1,
+                        "total": total,
+                        "code": c,
+                        "status": "error",
+                        "error": "Course not found"
+                    }) + "\n"
                 
             except Exception as e:
                 app.logger.error(f"Error fetching {c}: {e}", exc_info=True)
@@ -66,7 +92,7 @@ def api_courses():
                 results.append(error_result)
                 yield json.dumps({
                     "type": "progress",
-                    "current": i + 1,  # Still increment progress even on error
+                    "current": i + 1,
                     "total": total,
                     "code": c,
                     "status": "error",
